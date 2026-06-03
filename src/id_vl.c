@@ -21,6 +21,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "id_ca.h"
 #include "id_mm.h"
 #include "id_rf.h"
+#include "id_vl_hd.h"
 #include "id_vl_private.h"
 
 #include "ck_cross.h"
@@ -724,10 +725,11 @@ void VL_InitScreen(void)
 	vl_started = true;
 }
 
-static const char *vl_parmStrings[] = { "HIDDENCARD", "NOPAN", "" };
+static const char *vl_parmStrings[] = { "HIDDENCARD", "NOPAN", "HD", "" };
 
 bool vl_hiddenCard = false;
 bool vl_noPan = false;
+bool vl_hdAssets = false;
 
 void VL_Startup()
 {
@@ -743,21 +745,31 @@ void VL_Startup()
 		case 1:
 			vl_noPan = true;
 			break;
+		case 2:
+			vl_hdAssets = true;
+			break;
 		}
 	}
 	VL_InitScreen();
+	VL_HD_Startup();
 }
 
 void VL_Shutdown()
 {
 	if (vl_started)
 	{
+		VL_HD_Shutdown();
 		vl_currentBackend->destroySurface(vl_emuegavgaadapter.screen);
 		vl_currentBackend->setVideoMode(0);
 		vl_memused = 0;
 		vl_numsurfaces = 0;
 		vl_started = false;
 	}
+}
+
+VL_Backend *VL_GetCurrentBackend(void)
+{
+	return vl_currentBackend;
 }
 
 void VL_ResizeScreen(int w, int h)

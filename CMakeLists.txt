@@ -301,6 +301,8 @@ set(OMNISPEAK_ID_SRCS
 	src/id_vh.c
 	src/id_vl.h
 	src/id_vl.c
+	src/id_vl_hd.h
+	src/id_vl_hd.c
 	src/id_vl_private.h
 )
 

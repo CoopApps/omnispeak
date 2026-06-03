@@ -840,6 +840,86 @@ static void VL_SDL2GL_UpdateRect(void *surface, int x, int y, int w, int h)
 	}
 }
 
+// --- Optional HD rendering interface (see id_vl_hd.c, doc/hd-remaster.md) ---
+
+typedef struct VL_SDL2GL_HDImage
+{
+	GLuint texture;
+	int w, h;
+} VL_SDL2GL_HDImage;
+
+static bool VL_SDL2GL_HD_HasHD(void)
+{
+	// We need shaders + FBOs, which were already required for this backend to
+	// start at all, so HD is always usable here.
+	return true;
+}
+
+static void *VL_SDL2GL_HD_LoadImage(const void *fileData, int dataLen, int *outW, int *outH)
+{
+	SDL_RWops *rw = SDL_RWFromConstMem(fileData, dataLen);
+	if (!rw)
+		return NULL;
+	SDL_Surface *raw = SDL_LoadBMP_RW(rw, 1 /* free rw */);
+	if (!raw)
+	{
+		CK_Cross_LogMessage(CK_LOG_MSG_WARNING, "VL_SDL2GL: SDL_LoadBMP_RW failed: %s\n", SDL_GetError());
+		return NULL;
+	}
+
+	// Convert to a tightly-defined RGBA byte order for OpenGL. On little-endian,
+	// SDL_PIXELFORMAT_ABGR8888 lays out bytes as R,G,B,A in memory, matching
+	// GL_RGBA / GL_UNSIGNED_BYTE.
+	SDL_Surface *conv = SDL_ConvertSurfaceFormat(raw, SDL_PIXELFORMAT_ABGR8888, 0);
+	SDL_FreeSurface(raw);
+	if (!conv)
+		return NULL;
+
+	VL_SDL2GL_HDImage *img = (VL_SDL2GL_HDImage *)malloc(sizeof(VL_SDL2GL_HDImage));
+	if (!img)
+	{
+		SDL_FreeSurface(conv);
+		return NULL;
+	}
+	img->w = conv->w;
+	img->h = conv->h;
+
+	id_glGenTextures(1, &img->texture);
+	id_glBindTexture(GL_TEXTURE_2D, img->texture);
+	id_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	id_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	id_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	id_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	id_glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+	id_glPixelStorei(GL_UNPACK_ROW_LENGTH, conv->pitch / 4);
+	id_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, conv->w, conv->h, 0, GL_RGBA, GL_UNSIGNED_BYTE, conv->pixels);
+	id_glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+
+	SDL_FreeSurface(conv);
+
+	if (outW)
+		*outW = img->w;
+	if (outH)
+		*outH = img->h;
+	return img;
+}
+
+static void VL_SDL2GL_HD_DestroyImage(void *image)
+{
+	if (!image)
+		return;
+	VL_SDL2GL_HDImage *img = (VL_SDL2GL_HDImage *)image;
+	id_glDeleteTextures(1, &img->texture);
+	free(img);
+}
+
+static VL_HDBackend vl_sdl2gl_hdBackend =
+	{
+		/*.hasHD =*/&VL_SDL2GL_HD_HasHD,
+		/*.loadImage =*/&VL_SDL2GL_HD_LoadImage,
+		/*.destroyImage =*/&VL_SDL2GL_HD_DestroyImage,
+	};
+
 // Unfortunately, we can't take advantage of designated initializers in C++.
 VL_Backend vl_sdl2gl_backend =
 	{
@@ -870,7 +950,8 @@ VL_Backend vl_sdl2gl_backend =
 		/*.syncBuffers =*/&VL_SDL2GL_SyncBuffers,
 		/*.updateRect =*/&VL_SDL2GL_UpdateRect,
 		/*.flushParams =*/&VL_SDL2GL_FlushParams,
-		/*.waitVBLs =*/&VL_SDL2GL_WaitVBLs};
+		/*.waitVBLs =*/&VL_SDL2GL_WaitVBLs,
+		/*.hd =*/&vl_sdl2gl_hdBackend};
 
 VL_Backend *VL_Impl_GetBackend()
 {

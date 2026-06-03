@@ -88,6 +88,22 @@ typedef enum VL_SurfaceUsage
 	VL_SurfaceUsage_Sprite
 } VL_SurfaceUsage;
 
+// Optional high-resolution ("HD") rendering interface. A backend that can
+// render replacement HD artwork advertises it by setting the 'hd' field of
+// its VL_Backend (NULL means no HD support, which is the default). See
+// id_vl_hd.c and doc/hd-remaster.md.
+typedef struct VL_HDBackend
+{
+	// Returns true if HD rendering is actually usable on this backend/system.
+	bool (*hasHD)(void);
+	// Decodes an in-memory image file (currently 32-bit BMP) and uploads it as
+	// a GPU resource. Returns an opaque, backend-owned handle (NULL on failure)
+	// and writes the image's pixel dimensions to *outW/*outH.
+	void *(*loadImage)(const void *fileData, int dataLen, int *outW, int *outH);
+	// Frees an image previously returned by loadImage.
+	void (*destroyImage)(void *image);
+} VL_HDBackend;
+
 typedef struct VL_Backend
 {
 	void (*setVideoMode)(int mode);
@@ -118,6 +134,9 @@ typedef struct VL_Backend
 	void (*updateRect)(void *surface, int x, int y, int w, int h);
 	void (*flushParams)();
 	void (*waitVBLs)(int vbls);
+	// Optional HD interface. NULL on backends without HD support. Placed last
+	// so existing positional initializers (which omit it) zero-fill it to NULL.
+	struct VL_HDBackend *hd;
 } VL_Backend;
 
 void VL_InitScreen(void);
@@ -171,5 +190,8 @@ void VL_SwapOnNextPresent();
 void VL_Present();
 
 VL_Backend *VL_Impl_GetBackend(void);
+
+// Returns the backend selected at startup (valid after VL_InitScreen).
+VL_Backend *VL_GetCurrentBackend(void);
 
 #endif //ID_VL_H

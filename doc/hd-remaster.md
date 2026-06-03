@@ -98,53 +98,76 @@ and tells us *where* each tile/sprite is; the HD layer decides *how* it looks.
 
 ### 4.1 HD asset pack
 
-Introduce an asset pack loaded from a directory (e.g. `hd/`) alongside the game
-data, gated by a config key (`vl_hdAssets`, parsed like `rf_minTics` in
-`src/id_rf.c:614`) and/or a `/HD` command-line switch.
+An asset pack is gated by the config key `vl_hdAssets` (parsed like `rf_minTics`
+in `src/id_rf.c:614`) or the `/HD` command-line switch, both handled in
+`VL_Startup` (`src/id_vl.c`).
 
-Manifest (`hd/manifest.json` or a flat text file to avoid a JSON dependency)
-maps **original chunk numbers** to HD image files plus metadata:
+The manifest is a flat text file (no JSON dependency) that maps **original
+chunk numbers** to image files plus metadata. As implemented (`src/id_vl_hd.c`,
+`VL_HD_ParseLine`) each non-blank, non-`#` line is:
 
 ```
-# kind   chunk          file                   scale  originX originY
-tile16    <bg tile id>   tiles/bg_0123.png       4      -        -
-tile16m   <fg tile id>   tiles/fg_0048.png       4      -        -
-sprite    <chunk>        sprites/keen_walk0.png  4      40       28
-bitmap    <chunk>        ui/title.png            4      -        -
+# chunk   file              scale  originX  originY
+1234      bg_1234.bmp        4
+5678      keen_walk0.bmp     4      40       28
 ```
 
+- `chunk` is the **absolute** graphics chunk number (tiles, sprites and bitmaps
+  share one chunk-number space, so a single chunk→image map suffices). Only
+  `chunk` and `file` are required.
 - `scale` is the HD-pixels-per-EGA-pixel factor (e.g. 4 → a 16×16 tile becomes
-  64×64). A global default with per-asset overrides.
-- For sprites, `originX/originY` are the HD-space hotspot, derived from the EGA
+  64×64); defaults to 1.
+- For sprites, `originX/originY` are the EGA-pixel hotspot, derived from the EGA
   sprite's `originX/originY` (`VH_GetSpriteTableEntry`, used in
   `src/id_rf.c:1298`) so the HD art lands at the correct game position.
 
+**File locations.** The case-insensitive file opener
+(`FSL_OpenFileInDirCaseInsensitive`, `src/id_fs.c:80`) matches a single
+directory entry, so HD files currently live *flat* in the Keen data path
+(opened via `FS_OpenKeenFile`), next to `EGAGRAPH.CKx`. The manifest filename
+defaults to `omnispeak_hd.txt` (override with the `vl_hdManifest` config key).
+A future improvement is a dedicated HD search path so packs can live in their
+own subdirectory.
+
+**Image format.** Phase 1 decodes **32-bit BMP** via SDL's built-in
+`SDL_LoadBMP_RW`, which keeps the engine dependency-free. PNG support can be
+added later behind the same `loadImage` backend hook (e.g. via optional
+SDL_image or a vendored decoder).
+
 Chunk numbers are stable and already symbolically named in `GFXCHUNK.CKx`
 (`doc/modding.md:122`), which makes building the manifest tractable — a tool can
-dump every chunk to PNG (see `omnispeak --dumpgfx`-style tooling / idGrab) to use
-as a redraw/upscale base.
+dump every chunk to an image (idGrab / a `--dumpgfx`-style exporter) to use as a
+redraw/upscale base.
 
-### 4.2 HD compositor surface
+### 4.2 HD backend interface
 
-Add to `VL_Backend` (`src/id_vl.h:91`) an optional HD interface — keep it
-separate from the EGA blit functions so existing backends compile unchanged:
+`VL_Backend` (`src/id_vl.h`) carries an optional `VL_HDBackend *hd` pointer,
+kept separate from the EGA blit functions. It is the **last** field of
+`VL_Backend`, so the positional initializers in the non-HD backends (which omit
+it) zero-fill it to `NULL` — they need no changes and advertise no HD support.
+
+The interface as shipped in Phase 1 covers asset loading only:
 
 ```c
 typedef struct VL_HDBackend {
-    bool (*hasHD)(void);
-    void *(*loadHDImage)(const char *path);          // -> GPU texture
-    void  (*beginHDFrame)(int scrollXpx, int scrollYpx, float egaToScreenScale);
-    void  (*drawHDQuad)(void *tex, int egaX, int egaY, int egaW, int egaH,
-                        int shift /*0-3*/, bool maskOnly, int tintColor);
-    void  (*endHDFrame)(void);
+    bool  (*hasHD)(void);
+    void *(*loadImage)(const void *fileData, int dataLen, int *outW, int *outH);
+    void  (*destroyImage)(void *image);
 } VL_HDBackend;
 ```
 
-The compositor renders into an offscreen FBO sized to the output resolution
-(reusing the framebuffer-texture machinery already present —
-`vl_sdl2gl_framebufferTexture`, `id_glFramebufferTexture2DEXT`,
-`src/id_vl_sdl2gl.c:169`/`:603`). `egaToScreenScale` maps native EGA pixel coords
-to FBO coords so HD quads land exactly where the EGA frame would have.
+The backend-agnostic asset manager (`src/id_vl_hd.c`) reads the manifest, pulls
+each image file's bytes through `FS_OpenKeenFile`, hands them to
+`hd->loadImage`, and stores the resulting opaque handles in a chunk-sorted table
+queried via `VL_HD_GetImage(chunk)`. The SDL2-GL implementation
+(`VL_SDL2GL_HD_LoadImage`) decodes the BMP and uploads an RGBA GL texture.
+
+The **compositor draw path** (begin-frame / draw-quad / end-frame, rendering HD
+quads into an output-resolution FBO — reusing the framebuffer machinery at
+`src/id_vl_sdl2gl.c`, `vl_sdl2gl_framebufferTexture` /
+`id_glFramebufferTexture2DEXT`) is intentionally **deferred to Phase 2**, where
+it is delivered together with the refresh-manager hooks that exercise it (§4.3),
+so it can actually be tested rather than landing as untested dead code.
 
 ### 4.3 Hooking the refresh manager
 
@@ -279,7 +302,36 @@ This is a first, deliberately simple iteration; higher-quality upscalers
 (xBR, ScaleFX, Lanczos) can be added later as additional `vl_filter` values
 behind the same plumbing.
 
-## 9. Summary
+## 9. Phase 1: shipped — HD asset plumbing
+
+The foundational, render-inert half of the HD path is now in place:
+
+- **Backend interface.** `VL_HDBackend` (`src/id_vl.h`) with
+  `hasHD`/`loadImage`/`destroyImage`, hung off `VL_Backend` as an optional,
+  trailing `hd` pointer so the other backends zero-fill it to `NULL` and need
+  no changes.
+- **Asset manager.** `src/id_vl_hd.c` / `.h` — reads the manifest, loads each
+  image's bytes through `FS_OpenKeenFile`, uploads them via the backend, and
+  exposes `VL_HD_GetImage(chunk)` (chunk-sorted table + `bsearch`).
+- **GL implementation.** `VL_SDL2GL_HD_LoadImage` decodes 32-bit BMP with
+  `SDL_LoadBMP_RW` and uploads an RGBA texture; `VL_SDL2GL_HD_DestroyImage`
+  frees it.
+- **Switches.** `/HD` command-line flag and the `vl_hdAssets` config key (plus
+  `vl_hdManifest` for the manifest filename). Wired through `VL_Startup` /
+  `VL_Shutdown`, calling `VL_HD_Startup` / `VL_HD_Shutdown`.
+
+**It is inert by design.** With HD disabled (the default), or no manifest
+present, or on a backend without HD support, behaviour is byte-for-byte the
+EGA build. When enabled with a manifest, assets load (and log a count) but
+nothing is *drawn* yet — the compositor draw path and the refresh-manager
+hooks that feed it are Phase 2/3. This keeps Phase 1 fully buildable and
+testable on its own: success criteria are "no change when off" and "manifest
+loads without crashing when on".
+
+Failure modes degrade gracefully: a missing manifest, an unreadable image, a
+non-HD backend, or a decode failure each log a warning and fall back to EGA.
+
+## 10. Summary
 
 The engine is cleanly layered enough that an HD remaster does **not** require
 touching game logic. The plan is: (1) add edge-aware shader upscaling now for an
