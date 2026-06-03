@@ -200,6 +200,16 @@ enum VL_SDL2GL_Filter
 static int vl_sdl2gl_filter = VL_SDL2GL_Filter_None;
 static GLuint vl_sdl2gl_outputProgram = 0; // 0 when filter is None
 
+// HD compositor draw list (defined here so VL_SDL2GL_SetVideoMode(0) can free
+// it). Filled in between VL_SDL2GL_HD_BeginFrame / EndFrame, played back by
+// VL_SDL2GL_HD_FlushFrame during Present. See the HD section near the end of
+// this file.
+typedef struct VL_SDL2GL_HDDraw VL_SDL2GL_HDDraw;
+static VL_SDL2GL_HDDraw *vl_sdl2gl_hdDraws = NULL;
+static int vl_sdl2gl_hdNumDraws = 0;
+static int vl_sdl2gl_hdCapDraws = 0;
+static bool vl_sdl2gl_hdFrameReady = false;
+
 /* TODO (Overscan border):
  * - If a texture is used for offscreen rendering with scaling applied later,
  * it's better to have the borders within the texture itself.
@@ -394,6 +404,9 @@ static void VL_SDL2GL_SetVideoMode(int mode)
 			vl_sdl2gl_outputProgram = 0;
 		}
 		id_glDeleteTextures(1, &vl_sdl2gl_palTextureHandle);
+		free(vl_sdl2gl_hdDraws);
+		vl_sdl2gl_hdDraws = NULL;
+		vl_sdl2gl_hdNumDraws = vl_sdl2gl_hdCapDraws = 0;
 		SDL_ShowCursor(1);
 		SDL_GL_DeleteContext(vl_sdl2gl_context);
 		SDL_DestroyWindow(vl_sdl2gl_window);
@@ -656,6 +669,10 @@ static void VL_SDL2GL_ScrollSurface(void *surface, int x, int y)
 		VL_SDL2GL_SurfaceToSelf(surface, dx, dy, sx, sy, w, h);
 }
 
+// Forward declaration: implementation lives with the rest of the HD code below
+// (kept together for readability); Present calls it after the EGA quad.
+static void VL_SDL2GL_HD_FlushFrame(int scrlX, int scrlY, int screenW, int screenH);
+
 static void VL_SDL2GL_Present(void *surface, int scrlX, int scrlY, bool singleBuffered)
 {
 	int realWinW, realWinH;
@@ -742,6 +759,11 @@ static void VL_SDL2GL_Present(void *surface, int scrlX, int scrlY, bool singleBu
 	id_glTexCoordPointer(2, GL_FLOAT, 0, texCoords);
 
 	id_glDrawArrays(GL_QUADS, 0, 4);
+
+	// Composite any HD draws recorded for this frame on top of the EGA quad.
+	// Still inside the FBO + EGA viewport, so HD quads inherit the same
+	// EGA-pixel coord system as the EGA buffer and pick up the same scroll.
+	VL_SDL2GL_HD_FlushFrame(scrlX, scrlY, vl_sdl2gl_screenWidth, vl_sdl2gl_screenHeight);
 
 	id_glViewport(vl_fullRgn_x, realWinH - vl_fullRgn_y - vl_fullRgn_h, vl_fullRgn_w, vl_fullRgn_h);
 	// No filter: use EXT_framebuffer_blit if available (fast path), else a plain textured quad.
@@ -848,6 +870,15 @@ typedef struct VL_SDL2GL_HDImage
 	int w, h;
 } VL_SDL2GL_HDImage;
 
+// Per-frame HD draw list entry. State (vl_sdl2gl_hdDraws, ...) is declared
+// near the top of the file so SetVideoMode(0) can free it.
+struct VL_SDL2GL_HDDraw
+{
+	GLuint texture;
+	int bufX, bufY;	   // EGA buffer pixel coordinates (top-left).
+	int egaW, egaH;	   // Slot size in EGA buffer pixels.
+};
+
 static bool VL_SDL2GL_HD_HasHD(void)
 {
 	// We need shaders + FBOs, which were already required for this backend to
@@ -913,11 +944,98 @@ static void VL_SDL2GL_HD_DestroyImage(void *image)
 	free(img);
 }
 
+static void VL_SDL2GL_HD_BeginFrame(void)
+{
+	vl_sdl2gl_hdNumDraws = 0;
+	vl_sdl2gl_hdFrameReady = false;
+}
+
+static void VL_SDL2GL_HD_DrawQuad(void *image, int bufferPxX, int bufferPxY, int egaW, int egaH)
+{
+	if (!image)
+		return;
+	if (vl_sdl2gl_hdNumDraws == vl_sdl2gl_hdCapDraws)
+	{
+		int newCap = vl_sdl2gl_hdCapDraws ? vl_sdl2gl_hdCapDraws * 2 : 512;
+		VL_SDL2GL_HDDraw *grown = (VL_SDL2GL_HDDraw *)realloc(vl_sdl2gl_hdDraws, newCap * sizeof(VL_SDL2GL_HDDraw));
+		if (!grown)
+			return; // Out of memory: silently drop the draw rather than crashing mid-frame.
+		vl_sdl2gl_hdDraws = grown;
+		vl_sdl2gl_hdCapDraws = newCap;
+	}
+	VL_SDL2GL_HDDraw *d = &vl_sdl2gl_hdDraws[vl_sdl2gl_hdNumDraws++];
+	d->texture = ((VL_SDL2GL_HDImage *)image)->texture;
+	d->bufX = bufferPxX;
+	d->bufY = bufferPxY;
+	d->egaW = egaW;
+	d->egaH = egaH;
+}
+
+static void VL_SDL2GL_HD_EndFrame(void)
+{
+	vl_sdl2gl_hdFrameReady = true;
+}
+
+// Plays back the recorded HD draw list into the FBO. Called from Present
+// after the EGA quad has been drawn into the same FBO with the same viewport.
+// 'scrlX', 'scrlY' is the scroll within the EGA buffer (top-left of the
+// visible region, in EGA pixels). 'screenW', 'screenH' is the visible region
+// size in EGA pixels.
+static void VL_SDL2GL_HD_FlushFrame(int scrlX, int scrlY, int screenW, int screenH)
+{
+	if (!vl_sdl2gl_hdFrameReady || vl_sdl2gl_hdNumDraws == 0)
+		return;
+
+	// Pass-through textured quads: use the fixed pipeline so we don't need to
+	// ship a second shader. The textures were uploaded as GL_RGBA and already
+	// carry their own LINEAR filter / CLAMP_TO_EDGE wrap state.
+	id_glUseProgram(0);
+	id_glEnable(GL_TEXTURE_2D);
+	glEnable(GL_BLEND);
+	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+	// White vertex colour so MODULATE preserves the texture's RGBA.
+	glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+
+	id_glEnableClientState(GL_VERTEX_ARRAY);
+	id_glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+
+	// NDC mapping: the EGA quad's vertex (-1,-1)..(1,1) covers EGA buffer
+	// pixels (scrlX, scrlY)..(scrlX+screenW, scrlY+screenH), with NDC Y down
+	// matching EGA Y down (texCoords are flipped in the EGA pass). So:
+	//   ndcX = -1 + 2*(bufX - scrlX) / screenW
+	//   ndcY =  1 - 2*(bufY - scrlY) / screenH   (top edge)
+	float invW = 2.0f / (float)screenW;
+	float invH = 2.0f / (float)screenH;
+
+	// Tex coords cover the whole HD image; CLAMP_TO_EDGE absorbs any
+	// off-by-one sampling at the edges of magnified output.
+	float texCoords[] = {0.0f, 0.0f, 1.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f};
+	id_glTexCoordPointer(2, GL_FLOAT, 0, texCoords);
+
+	for (int i = 0; i < vl_sdl2gl_hdNumDraws; ++i)
+	{
+		const VL_SDL2GL_HDDraw *d = &vl_sdl2gl_hdDraws[i];
+		float x0 = -1.0f + (float)(d->bufX - scrlX) * invW;
+		float x1 = x0 + (float)d->egaW * invW;
+		float y0 = 1.0f - (float)(d->bufY - scrlY) * invH;	    // top
+		float y1 = y0 - (float)d->egaH * invH;			    // bottom
+		float vtxCoords[] = {x0, y1, x1, y1, x1, y0, x0, y0};
+		id_glBindTexture(GL_TEXTURE_2D, d->texture);
+		id_glVertexPointer(2, GL_FLOAT, 0, vtxCoords);
+		id_glDrawArrays(GL_QUADS, 0, 4);
+	}
+
+	glDisable(GL_BLEND);
+}
+
 static VL_HDBackend vl_sdl2gl_hdBackend =
 	{
 		/*.hasHD =*/&VL_SDL2GL_HD_HasHD,
 		/*.loadImage =*/&VL_SDL2GL_HD_LoadImage,
 		/*.destroyImage =*/&VL_SDL2GL_HD_DestroyImage,
+		/*.beginFrame =*/&VL_SDL2GL_HD_BeginFrame,
+		/*.drawQuad =*/&VL_SDL2GL_HD_DrawQuad,
+		/*.endFrame =*/&VL_SDL2GL_HD_EndFrame,
 	};
 
 // Unfortunately, we can't take advantage of designated initializers in C++.

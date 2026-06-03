@@ -57,4 +57,12 @@ bool VL_HD_IsEnabled(void);
 // (or HD is disabled). The returned pointer is owned by the manager.
 const VL_HDImage *VL_HD_GetImage(int chunk);
 
+// Per-frame compositor wrappers. No-ops when HD is disabled.
+void VL_HD_BeginFrame(void);
+// Submits an HD draw for an original chunk if a replacement exists; silently
+// does nothing otherwise (so the caller can blindly call this for every tile
+// and let the manager decide whether to draw).
+void VL_HD_DrawChunk(int chunk, int bufferPxX, int bufferPxY, int egaW, int egaH);
+void VL_HD_EndFrame(void);
+
 #endif // ID_VL_HD_H

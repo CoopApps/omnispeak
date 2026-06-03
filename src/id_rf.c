@@ -25,6 +25,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "id_us.h"
 #include "id_vh.h"
 #include "id_vl.h"
+#include "id_vl_hd.h"
 #include "id_cfg.h"
 #include "ck_cross.h"
 #include "ck_ep.h"
@@ -1445,6 +1446,33 @@ void RF_Refresh()
 
 	if (rf_drawFunc)
 		rf_drawFunc();
+
+	// HD tile compositor. Walks every visible buffer cell and submits an HD
+	// draw for each plane that has a replacement; cells without HD assets
+	// remain whatever was blitted into rf_tileBuffer. No dirty tracking: the
+	// GPU doesn't care, and this keeps the HD path independent of every site
+	// that calls RF_RenderTile16. Manager is inert when HD is disabled.
+	VL_HD_BeginFrame();
+	{
+		int scrollXtile = RF_UnitToTile(rf_scrollXUnit);
+		int scrollYtile = RF_UnitToTile(rf_scrollYUnit);
+		for (int ty = 0; ty < RF_BUFFER_HEIGHT_TILES; ++ty)
+		{
+			for (int tx = 0; tx < RF_BUFFER_WIDTH_TILES; ++tx)
+			{
+				int mapX = scrollXtile + tx;
+				int mapY = scrollYtile + ty;
+				int bgTile = CA_TileAtPos(mapX, mapY, 0);
+				int fgTile = CA_TileAtPos(mapX, mapY, 1);
+				int bufPxX = tx * 16;
+				int bufPxY = ty * 16;
+				VL_HD_DrawChunk(ca_gfxInfoE.offTiles16 + bgTile, bufPxX, bufPxY, 16, 16);
+				if (fgTile)
+					VL_HD_DrawChunk(ca_gfxInfoE.offTiles16m + fgTile, bufPxX, bufPxY, 16, 16);
+			}
+		}
+	}
+	VL_HD_EndFrame();
 
 	// 0xef for the X-direction to match EGA keen's 2px horz scrolling.
 	VL_SetScrollCoords(RF_UnitToPixel(rf_scrollXUnit & 0xef), RF_UnitToPixel(rf_scrollYUnit & 0xff));

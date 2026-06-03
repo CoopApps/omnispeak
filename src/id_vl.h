@@ -102,6 +102,16 @@ typedef struct VL_HDBackend
 	void *(*loadImage)(const void *fileData, int dataLen, int *outW, int *outH);
 	// Frees an image previously returned by loadImage.
 	void (*destroyImage)(void *image);
+
+	// Per-frame HD compositor. The backend records draws between begin/end and
+	// composites them over the upscaled EGA frame inside its present() pass.
+	// Coordinates are in EGA buffer pixels (same space as VL_SetScrollCoords);
+	// scrolling is applied by the backend using the scroll passed to present().
+	void (*beginFrame)(void);
+	// Draws a single HD image into an EGA-pixel rectangle of the buffer.
+	// 'image' must be a handle previously returned by loadImage.
+	void (*drawQuad)(void *image, int bufferPxX, int bufferPxY, int egaW, int egaH);
+	void (*endFrame)(void);
 } VL_HDBackend;
 
 typedef struct VL_Backend

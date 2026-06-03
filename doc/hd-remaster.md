@@ -331,7 +331,49 @@ loads without crashing when on".
 Failure modes degrade gracefully: a missing manifest, an unreadable image, a
 non-HD backend, or a decode failure each log a warning and fall back to EGA.
 
-## 10. Summary
+## 10. Phase 2: shipped — HD tile compositor
+
+The HD draw path is now wired up for tiles:
+
+- **Backend interface.** `VL_HDBackend` gained `beginFrame` /
+  `drawQuad(image, bufferPxX, bufferPxY, egaW, egaH)` / `endFrame`
+  (`src/id_vl.h`). Coordinates are in **EGA buffer pixels** — the same
+  coordinate space as `VL_SetScrollCoords` — so the existing scroll plumbing
+  applies unchanged to HD draws.
+- **Manager wrappers.** `VL_HD_BeginFrame` / `VL_HD_DrawChunk(chunk, ...)` /
+  `VL_HD_EndFrame` (`src/id_vl_hd.c`). `DrawChunk` looks up the chunk and
+  silently no-ops if there's no HD replacement, so callers can submit
+  blindly for every cell.
+- **GL implementation.** `VL_SDL2GL_HD_FlushFrame` plays back the recorded
+  list as textured quads, drawn into the same FBO as the EGA quad, with the
+  same viewport (`vl_renderRgn`). NDC math maps each buffer-pixel
+  rectangle to the visible region using the same `scrlX/scrlY` Present
+  already receives. Uses fixed-function texturing (no second shader) with
+  `GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA` blending so HD foreground tiles
+  composite correctly over HD or EGA backgrounds.
+- **Refresh-manager hook.** `RF_Refresh` (`src/id_rf.c`) walks all 21 × 14
+  visible buffer cells once per frame and submits `VL_HD_DrawChunk` for
+  the bg plane (`ca_gfxInfoE.offTiles16 + bgTile`) and, if non-zero, the fg
+  plane (`ca_gfxInfoE.offTiles16m + fgTile`). EGA blits to `rf_tileBuffer`
+  continue unchanged, so cells without an HD replacement fall back to
+  upscaled EGA pixel-for-pixel. No dirty-block tracking on the HD path —
+  modern GPUs don't need it, and the chunk-replacement model is unaffected
+  by which code site originally called `RF_RenderTile16`.
+
+**Fallback granularity is per cell, per plane.** A pack can replace just one
+or two tiles and everything else continues to render as EGA.
+
+**Known limitation.** If a cell's bg has an HD replacement but its fg does
+not (and the EGA fg is non-empty), the HD bg covers the EGA fg, since HD
+quads composite over the upscaled EGA frame. Pack authors should provide
+HD fg for any cell where they replace bg AND the EGA fg is non-empty. This
+is a documentation contract, not a code limit.
+
+Per-frame cost: at most 21·14·2 = 588 chunk lookups + bounded GPU draws (a
+fraction of one millisecond on any GPU shipped this century). Off-screen
+cells produce quads that fall outside the viewport and are clipped by GL.
+
+## 11. Summary
 
 The engine is cleanly layered enough that an HD remaster does **not** require
 touching game logic. The plan is: (1) add edge-aware shader upscaling now for an

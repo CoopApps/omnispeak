@@ -213,3 +213,33 @@ const VL_HDImage *VL_HD_GetImage(int chunk)
 	key.chunk = chunk;
 	return (const VL_HDImage *)bsearch(&key, vl_hd_images, vl_hd_numImages, sizeof(VL_HDImage), VL_HD_CompareImages);
 }
+
+void VL_HD_BeginFrame(void)
+{
+	if (!vl_hd_enabled)
+		return;
+	VL_Backend *backend = VL_GetCurrentBackend();
+	if (backend && backend->hd && backend->hd->beginFrame)
+		backend->hd->beginFrame();
+}
+
+void VL_HD_DrawChunk(int chunk, int bufferPxX, int bufferPxY, int egaW, int egaH)
+{
+	if (!vl_hd_enabled)
+		return;
+	const VL_HDImage *img = VL_HD_GetImage(chunk);
+	if (!img)
+		return;
+	VL_Backend *backend = VL_GetCurrentBackend();
+	if (backend && backend->hd && backend->hd->drawQuad)
+		backend->hd->drawQuad(img->image, bufferPxX, bufferPxY, egaW, egaH);
+}
+
+void VL_HD_EndFrame(void)
+{
+	if (!vl_hd_enabled)
+		return;
+	VL_Backend *backend = VL_GetCurrentBackend();
+	if (backend && backend->hd && backend->hd->endFrame)
+		backend->hd->endFrame();
+}
