@@ -257,7 +257,29 @@ point: any chunk without HD art simply renders upscaled-EGA.
   to upscaled-EGA ones. Acceptable for development; a "complete pack" is the
   release bar.
 
-## 8. Summary
+## 8. Phase 0: shipped — output filters
+
+The SDL2+OpenGL backend now supports a configurable output-pass filter,
+applied during the final FBO→window step in `VL_SDL2GL_Present`
+(`src/id_vl_sdl2gl.c`). Selected via the config key `vl_filter`:
+
+- `none` (default) — unchanged. Uses `glBlitFramebufferEXT` fast path when
+  available.
+- `scanlines` — alternating dim/bright horizontal lines tracking the rendered
+  EGA scanline grid.
+- `crt` — scanlines plus an RGB sub-pixel mask and a soft vignette.
+
+When a filter is selected, the FBO→window pass goes through a textured-quad
+draw with a small fragment shader instead of the framebuffer blit. If a
+filter's shader fails to compile or link at startup, the backend logs a
+warning and silently falls back to `none`, so no configuration can render
+the game unplayable.
+
+This is a first, deliberately simple iteration; higher-quality upscalers
+(xBR, ScaleFX, Lanczos) can be added later as additional `vl_filter` values
+behind the same plumbing.
+
+## 9. Summary
 
 The engine is cleanly layered enough that an HD remaster does **not** require
 touching game logic. The plan is: (1) add edge-aware shader upscaling now for an

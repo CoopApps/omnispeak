@@ -1,0 +1,3 @@
+/home/user/omnispeak/build/CMakeFiles/omnispeak.dir
+/home/user/omnispeak/build/CMakeFiles/edit_cache.dir
+/home/user/omnispeak/build/CMakeFiles/rebuild_cache.dir

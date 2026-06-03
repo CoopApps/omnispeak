@@ -3,6 +3,7 @@
 #include <SDL_opengl.h>
 #include <stdlib.h>
 #include <string.h>
+#include "id_cfg.h"
 #include "id_us.h"
 #include "id_vl.h"
 #include "id_vl_private.h"
@@ -89,6 +90,8 @@ typedef void(APIENTRYP PFN_ID_GLUSEPROGRAMPROC)(GLuint program);
 PFN_ID_GLUSEPROGRAMPROC id_glUseProgram = 0;
 typedef void(APIENTRYP PFN_ID_GLUNIFORM1IPROC)(GLint location, GLint v0);
 PFN_ID_GLUNIFORM1IPROC id_glUniform1i = 0;
+typedef void(APIENTRYP PFN_ID_GLUNIFORM2FPROC)(GLint location, GLfloat v0, GLfloat v1);
+PFN_ID_GLUNIFORM2FPROC id_glUniform2f = 0;
 // EXT_framebuffer_object
 typedef GLboolean(APIENTRYP PFN_ID_GLISFRAMEBUFFEREXTPROC)(GLuint framebuffer);
 PFN_ID_GLISFRAMEBUFFEREXTPROC id_glIsFramebufferEXT = 0;
@@ -158,6 +161,7 @@ static bool VL_SDL2GL_LoadGLProcs()
 	id_glShaderSource = (PFN_ID_GLSHADERSOURCEPROC)SDL_GL_GetProcAddress("glShaderSource");
 	id_glUseProgram = (PFN_ID_GLUSEPROGRAMPROC)SDL_GL_GetProcAddress("glUseProgram");
 	id_glUniform1i = (PFN_ID_GLUNIFORM1IPROC)SDL_GL_GetProcAddress("glUniform1i");
+	id_glUniform2f = (PFN_ID_GLUNIFORM2FPROC)SDL_GL_GetProcAddress("glUniform2f");
 	// EXT_framebuffer_object
 	if (!SDL_GL_ExtensionSupported("GL_EXT_framebuffer_object"))
 		return false;
@@ -185,6 +189,17 @@ static int vl_sdl2gl_framebufferWidth, vl_sdl2gl_framebufferHeight;
 static int vl_sdl2gl_screenWidth;
 static int vl_sdl2gl_screenHeight;
 
+// Output filter: applied during the final FBO->window pass.
+// Selected at startup via the "vl_filter" config key.
+enum VL_SDL2GL_Filter
+{
+	VL_SDL2GL_Filter_None = 0,
+	VL_SDL2GL_Filter_Scanlines,
+	VL_SDL2GL_Filter_CRT,
+};
+static int vl_sdl2gl_filter = VL_SDL2GL_Filter_None;
+static GLuint vl_sdl2gl_outputProgram = 0; // 0 when filter is None
+
 /* TODO (Overscan border):
  * - If a texture is used for offscreen rendering with scaling applied later,
  * it's better to have the borders within the texture itself.
@@ -209,6 +224,73 @@ const char *pxprog = "#version 110\n"
 		     "void main() {\n"
 		     "\tgl_FragColor = texture1D(palette,texture2D(screenBuf, gl_TexCoord[0].xy).r);\n"
 		     "}\n";
+
+// Output-pass filters. Sample the (already palette-resolved) FBO texture and
+// apply an effect. srcSize.y is the FBO height in pixels; we use it to derive
+// scanline frequency so the effect tracks the rendered EGA scanlines.
+static const char *vl_sdl2gl_scanlinesProg =
+	"#version 110\n"
+	"uniform sampler2D srcTex;\n"
+	"uniform vec2 srcSize;\n"
+	"void main() {\n"
+	"    vec3 c = texture2D(srcTex, gl_TexCoord[0].xy).rgb;\n"
+	"    float line = mod(gl_TexCoord[0].y * srcSize.y, 2.0);\n"
+	"    float dim = line < 1.0 ? 0.72 : 1.0;\n"
+	"    gl_FragColor = vec4(c * dim, 1.0);\n"
+	"}\n";
+
+static const char *vl_sdl2gl_crtProg =
+	"#version 110\n"
+	"uniform sampler2D srcTex;\n"
+	"uniform vec2 srcSize;\n"
+	"void main() {\n"
+	"    vec2 uv = gl_TexCoord[0].xy;\n"
+	"    vec3 c = texture2D(srcTex, uv).rgb;\n"
+	"    // RGB sub-pixel mask, cycles every 3 output pixels horizontally.\n"
+	"    float phase = mod(uv.x * srcSize.x, 3.0);\n"
+	"    vec3 mask = vec3(0.85);\n"
+	"    if (phase < 1.0) mask = vec3(1.0, 0.80, 0.80);\n"
+	"    else if (phase < 2.0) mask = vec3(0.80, 1.0, 0.80);\n"
+	"    else mask = vec3(0.80, 0.80, 1.0);\n"
+	"    // Scanlines.\n"
+	"    float line = mod(uv.y * srcSize.y, 2.0);\n"
+	"    float dim = line < 1.0 ? 0.70 : 1.0;\n"
+	"    // Vignette.\n"
+	"    vec2 vd = uv - vec2(0.5);\n"
+	"    float vig = 1.0 - dot(vd, vd) * 0.55;\n"
+	"    // Slight saturation/contrast lift to compensate for the mask darkening.\n"
+	"    c = c * mask * dim * vig * 1.18;\n"
+	"    gl_FragColor = vec4(c, 1.0);\n"
+	"}\n";
+
+static GLuint VL_SDL2GL_BuildProgram(const char *fragSrc, const char *label)
+{
+	int status = 0;
+	GLuint sh = id_glCreateShader(GL_FRAGMENT_SHADER);
+	id_glShaderSource(sh, 1, &fragSrc, 0);
+	id_glCompileShader(sh);
+	id_glGetShaderiv(sh, GL_COMPILE_STATUS, &status);
+	if (!status)
+	{
+		char log[1024] = {0};
+		id_glGetShaderInfoLog(sh, sizeof(log) - 1, NULL, log);
+		CK_Cross_LogMessage(CK_LOG_MSG_WARNING, "VL_SDL2GL: %s shader failed to compile: %s\n", label, log);
+		id_glDeleteShader(sh);
+		return 0;
+	}
+	GLuint prog = id_glCreateProgram();
+	id_glAttachShader(prog, sh);
+	id_glLinkProgram(prog);
+	id_glDeleteShader(sh);
+	id_glGetProgramiv(prog, GL_LINK_STATUS, &status);
+	if (!status)
+	{
+		id_glDeleteProgram(prog);
+		CK_Cross_LogMessage(CK_LOG_MSG_WARNING, "VL_SDL2GL: %s program failed to link\n", label);
+		return 0;
+	}
+	return prog;
+}
 
 void VL_SDL2GL_SetIcon(SDL_Window *wnd);
 
@@ -279,6 +361,17 @@ static void VL_SDL2GL_SetVideoMode(int mode)
 		id_glTexImage1D(GL_TEXTURE_1D, 0, GL_RGB, 256, 0, GL_RGB, GL_UNSIGNED_BYTE, 0);
 		id_glActiveTexture(GL_TEXTURE0);
 
+		// Compile the configured output-pass filter, if any. Failure falls back to no filter.
+		static const char *filterNames[] = {"none", "scanlines", "crt", NULL};
+		vl_sdl2gl_filter = CFG_GetConfigEnum("vl_filter", filterNames, VL_SDL2GL_Filter_None);
+		vl_sdl2gl_outputProgram = 0;
+		if (vl_sdl2gl_filter == VL_SDL2GL_Filter_Scanlines)
+			vl_sdl2gl_outputProgram = VL_SDL2GL_BuildProgram(vl_sdl2gl_scanlinesProg, "scanlines");
+		else if (vl_sdl2gl_filter == VL_SDL2GL_Filter_CRT)
+			vl_sdl2gl_outputProgram = VL_SDL2GL_BuildProgram(vl_sdl2gl_crtProg, "crt");
+		if (vl_sdl2gl_filter != VL_SDL2GL_Filter_None && !vl_sdl2gl_outputProgram)
+			vl_sdl2gl_filter = VL_SDL2GL_Filter_None;
+
 		// Setup framebuffer stuff, just in case.
 		vl_sdl2gl_framebufferWidth = vl_sdl2gl_screenWidth;
 		vl_sdl2gl_framebufferHeight = vl_sdl2gl_screenHeight;
@@ -295,6 +388,11 @@ static void VL_SDL2GL_SetVideoMode(int mode)
 		if (vl_sdl2gl_framebufferObject)
 			id_glDeleteFramebuffersEXT(1, &vl_sdl2gl_framebufferObject);
 		id_glDeleteProgram(vl_sdl2gl_program);
+		if (vl_sdl2gl_outputProgram)
+		{
+			id_glDeleteProgram(vl_sdl2gl_outputProgram);
+			vl_sdl2gl_outputProgram = 0;
+		}
 		id_glDeleteTextures(1, &vl_sdl2gl_palTextureHandle);
 		SDL_ShowCursor(1);
 		SDL_GL_DeleteContext(vl_sdl2gl_context);
@@ -646,8 +744,10 @@ static void VL_SDL2GL_Present(void *surface, int scrlX, int scrlY, bool singleBu
 	id_glDrawArrays(GL_QUADS, 0, 4);
 
 	id_glViewport(vl_fullRgn_x, realWinH - vl_fullRgn_y - vl_fullRgn_h, vl_fullRgn_w, vl_fullRgn_h);
-	// Use EXT_framebuffer_blit if available, otherwise draw a quad.
-	if (SDL_GL_ExtensionSupported("GL_EXT_framebuffer_blit"))
+	// No filter: use EXT_framebuffer_blit if available (fast path), else a plain textured quad.
+	// With a filter: always go through the shader-quad path so we can sample the FBO texture.
+	bool useBlit = (vl_sdl2gl_filter == VL_SDL2GL_Filter_None) && SDL_GL_ExtensionSupported("GL_EXT_framebuffer_blit");
+	if (useBlit)
 	{
 		id_glBindFramebufferEXT(GL_DRAW_FRAMEBUFFER_EXT, 0);
 		id_glBindFramebufferEXT(GL_READ_FRAMEBUFFER_EXT, vl_sdl2gl_framebufferObject);
@@ -663,9 +763,20 @@ static void VL_SDL2GL_Present(void *surface, int scrlX, int scrlY, bool singleBu
 		float fboCoords[] = {0.0f, 0.0f, 1.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f};
 		id_glVertexPointer(2, GL_FLOAT, 0, vtxCoords);
 		id_glTexCoordPointer(2, GL_FLOAT, 0, fboCoords);
-		id_glUseProgram(0);
 		id_glEnable(GL_TEXTURE_2D);
 		id_glBindTexture(GL_TEXTURE_2D, vl_sdl2gl_framebufferTexture);
+		if (vl_sdl2gl_filter != VL_SDL2GL_Filter_None && vl_sdl2gl_outputProgram)
+		{
+			id_glUseProgram(vl_sdl2gl_outputProgram);
+			id_glUniform1i(id_glGetUniformLocation(vl_sdl2gl_outputProgram, "srcTex"), 0);
+			GLint sizeLoc = id_glGetUniformLocation(vl_sdl2gl_outputProgram, "srcSize");
+			if (sizeLoc >= 0 && id_glUniform2f)
+				id_glUniform2f(sizeLoc, (GLfloat)vl_integerWidth, (GLfloat)vl_integerHeight);
+		}
+		else
+		{
+			id_glUseProgram(0);
+		}
 		id_glDrawArrays(GL_QUADS, 0, 4);
 	}
 
