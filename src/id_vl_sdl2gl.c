@@ -208,7 +208,6 @@ typedef struct VL_SDL2GL_HDDraw VL_SDL2GL_HDDraw;
 static VL_SDL2GL_HDDraw *vl_sdl2gl_hdDraws = NULL;
 static int vl_sdl2gl_hdNumDraws = 0;
 static int vl_sdl2gl_hdCapDraws = 0;
-static bool vl_sdl2gl_hdFrameReady = false;
 
 /* TODO (Overscan border):
  * - If a texture is used for offscreen rendering with scaling applied later,
@@ -947,8 +946,12 @@ static void VL_SDL2GL_HD_DestroyImage(void *image)
 
 static void VL_SDL2GL_HD_BeginFrame(void)
 {
-	vl_sdl2gl_hdNumDraws = 0;
-	vl_sdl2gl_hdFrameReady = false;
+	// Resetting the list happens after each Present-time flush (see
+	// VL_SDL2GL_HD_FlushFrame), so submissions that aren't bracketed by
+	// begin/end (e.g. from VH bitmap / sprite UI calls outside RF_Refresh)
+	// still composite correctly. This call is kept as a documentation aid
+	// at the start of an RF refresh, but does no real work.
+	(void)0;
 }
 
 static void VL_SDL2GL_HD_DrawQuad(void *image, int bufferPxX, int bufferPxY, int egaW, int egaH, bool maskOnly)
@@ -975,7 +978,9 @@ static void VL_SDL2GL_HD_DrawQuad(void *image, int bufferPxX, int bufferPxY, int
 
 static void VL_SDL2GL_HD_EndFrame(void)
 {
-	vl_sdl2gl_hdFrameReady = true;
+	// See VL_SDL2GL_HD_BeginFrame: the gate is gone, every Present flushes
+	// whatever has been submitted. Left as a no-op for API symmetry.
+	(void)0;
 }
 
 // Plays back the recorded HD draw list into the FBO. Called from Present
@@ -985,7 +990,7 @@ static void VL_SDL2GL_HD_EndFrame(void)
 // size in EGA pixels.
 static void VL_SDL2GL_HD_FlushFrame(int scrlX, int scrlY, int screenW, int screenH)
 {
-	if (!vl_sdl2gl_hdFrameReady || vl_sdl2gl_hdNumDraws == 0)
+	if (vl_sdl2gl_hdNumDraws == 0)
 		return;
 
 	// Pass-through textured quads: use the fixed pipeline so we don't need to
@@ -1054,6 +1059,9 @@ static void VL_SDL2GL_HD_FlushFrame(int scrlX, int scrlY, int screenW, int scree
 	if (combineActive)
 		glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
 	glDisable(GL_BLEND);
+
+	// Consumed: the next frame starts with an empty list.
+	vl_sdl2gl_hdNumDraws = 0;
 }
 
 static VL_HDBackend vl_sdl2gl_hdBackend =

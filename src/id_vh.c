@@ -22,6 +22,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "id_mm.h"
 #include "id_rf.h"
 #include "id_vl.h"
+#include "id_vl_hd.h"
 
 //TODO: Should these functions cache the bitmap tables?
 VH_BitmapTableEntry VH_GetBitmapTableEntry(int bitmapNumber)
@@ -136,6 +137,10 @@ void VH_DrawBitmap(int x, int y, int chunk)
 	VH_BitmapTableEntry dimensions = VH_GetBitmapTableEntry(bitmapNumber);
 
 	VL_UnmaskedToScreen(CA_GetGrChunk(chunk, 0, "Bitmap", true), x, y, dimensions.width * 8, dimensions.height);
+
+	// HD: submit the same chunk at the same screen-pixel rect. The compositor
+	// is inert when HD is disabled or no replacement exists, so this is free.
+	VL_HD_DrawChunk(chunk, x, y, dimensions.width * 8, dimensions.height, false);
 }
 
 void VH_DrawMaskedBitmap(int x, int y, int chunk)
@@ -145,6 +150,7 @@ void VH_DrawMaskedBitmap(int x, int y, int chunk)
 	VH_BitmapTableEntry dim = VH_GetMaskedBitmapTableEntry(bitmapNumber);
 
 	VL_MaskedBlitToScreen(CA_GetGrChunk(chunk, 0, "MaskedBitmap", true), x, y, dim.width * 8, dim.height);
+	VL_HD_DrawChunk(chunk, x, y, dim.width * 8, dim.height, false);
 }
 
 void VH_DrawSprite(int x, int y, int chunk)
@@ -162,6 +168,9 @@ void VH_DrawSprite(int x, int y, int chunk)
 	int width = shifted->sprShiftByteWidths[shift] * 8;
 
 	VL_MaskedBlitToScreen(data, x & ~7, y, width, spr.height);
+	// HD: place at the native (sub-pixel-recovered) origin and native size,
+	// matching the EGA bitmap's bounding box.
+	VL_HD_DrawChunk(chunk, x, y, spr.width, spr.height, false);
 }
 
 void VH_DrawSpriteMask(int x, int y, int chunk, int colour)
@@ -179,6 +188,10 @@ void VH_DrawSpriteMask(int x, int y, int chunk, int colour)
 	int width = shifted->sprShiftByteWidths[shift] * 8;
 
 	VL_1bppInvBlitToScreen(data, x & ~7, y, width, spr.height, colour);
+	// HD: silhouette only (the colour argument is folded down to white; vanilla
+	// callers use white nearly exclusively, and the alternative is colour-keyed
+	// state we don't want to thread through the backend yet).
+	VL_HD_DrawChunk(chunk, x, y, spr.width, spr.height, true);
 }
 
 void VH_DrawShiftedSprite(int x, int y, int chunk, int shift)

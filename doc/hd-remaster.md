@@ -414,7 +414,41 @@ tile. The fix is to provide HD art for the neighbouring chunks too; a
 "complete pack" has no mixed-layer seams. Documented as a pack-authoring
 contract.
 
-## 12. Summary
+## 12. Phase 4: shipped — HD UI bitmaps & sprites
+
+UI artwork now uses the same chunk-replacement path. The big visible win
+is replacing static screens (title, game-over, paddle-game backgrounds,
+status bar bitmaps) with HD versions.
+
+- **VH hooks.** `src/id_vh.c` now submits HD draws alongside the EGA blit
+  in `VH_DrawBitmap`, `VH_DrawMaskedBitmap`, `VH_DrawSprite`, and
+  `VH_DrawSpriteMask` — each at the same screen-pixel rect the EGA call
+  uses. The compositor early-outs if HD is off or no replacement exists,
+  so these hooks are free for non-HD builds.
+- **No double-submission with RFL sprites.** `VH_DrawShiftedSprite` and
+  `VH_DrawShiftedSpriteMask` are intentionally **not** hooked: they are
+  called only from `RFL_DrawSpriteList`, which already submits each
+  visible sprite once via `VL_HD_DrawChunk` with the sub-pixel-recovered
+  position. Hooking them here as well would double-draw HD sprites.
+- **Begin/end gate dropped.** `VL_HD_BeginFrame` / `VL_HD_EndFrame` are
+  now documentation no-ops in the GL backend: the draw list resets after
+  every Present-time flush, not at BeginFrame. This lets UI code that
+  doesn't go through `RF_Refresh` (menus, the title sequence, the
+  paddle-game intro) accumulate HD draws and have them flushed by
+  whatever `VL_Present` call eventually occurs.
+- **Mask colour collapsed to white.** `VH_DrawSpriteMask(... colour)`
+  takes an EGA colour for the silhouette; the HD path always draws it
+  white (the existing `maskOnly` combiner state). Vanilla callers use
+  colour 15 nearly exclusively, so this is a sane simplification.
+
+**Fonts are deliberately out of scope for Phase 4.** `VH_DrawPropString`
+/ `VH_DrawPropChar` push one 1-bpp glyph per character via
+`VL_1bppToScreen`, with per-glyph variable widths. Doing them well needs
+either a glyph-atlas HD font texture or per-codepoint manifest entries;
+the existing output filters (Phase 0) already upscale EGA fonts
+acceptably. Deferred to a future phase with the right tooling.
+
+## 13. Summary
 
 The engine is cleanly layered enough that an HD remaster does **not** require
 touching game logic. The plan is: (1) add edge-aware shader upscaling now for an
