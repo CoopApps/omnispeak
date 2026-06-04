@@ -373,7 +373,48 @@ Per-frame cost: at most 21·14·2 = 588 chunk lookups + bounded GPU draws (a
 fraction of one millisecond on any GPU shipped this century). Off-screen
 cells produce quads that fall outside the viewport and are clipped by GL.
 
-## 11. Summary
+## 11. Phase 3: shipped — HD sprites & z-order
+
+Sprites now get the same chunk-replacement treatment, composited in correct
+z-order with the HD tiles from Phase 2.
+
+- **Draw order.** The whole HD frame is now built inside `RFL_DrawSpriteList`
+  (`src/id_rf.c`), mirroring the EGA draw order exactly:
+  1. `RFL_SubmitHDBackgroundTiles` — bg plane for every cell, plus
+     **non-fore** fg-plane tiles (`!(TI_ForeMisc(tile) & 0x80)`).
+  2. Sprite z-layers 0–2.
+  3. `RFL_SubmitHDForeTiles` — **fore**-flagged fg-plane tiles, on top of
+     those sprites (submitted right after the existing `RFL_RenderForeTiles`).
+  4. Sprite z-layer 3.
+  This replaces Phase 2's single end-of-frame tile loop (which couldn't
+  interleave sprites). `RF_Refresh` just wraps `RFL_DrawSpriteList` with
+  `VL_HD_BeginFrame` / `VL_HD_EndFrame`.
+- **Sprite placement.** Each in-bounds sprite is submitted every frame
+  (no dirty gating — the GPU redraws the lot) at
+  `(pixelX + shift*2, pixelY)` with the native `ste.width × ste.height`.
+  Recovering the sub-pixel `shift*2` that the EGA path bakes into the
+  shifted bitmap lands the HD art exactly where the EGA frame sits;
+  `originX/originY` are already folded into `sde->x/y` by `RF_AddSpriteDraw`.
+  HD sprites are assumed to cover the native sprite's bounding box (so the
+  manifest's `originX/originY` columns are informational for now).
+- **White flash preserved.** The damage/collect flash (`maskOnly` sprites,
+  EGA `VH_DrawShiftedSpriteMask`) is reproduced by `drawQuad`'s new
+  `maskOnly` path: fixed-function texture combiners output a solid-white RGB
+  while keeping the texture's alpha (`GL_COMBINE`: `REPLACE(PRIMARY_COLOR)`
+  for RGB, `REPLACE(TEXTURE)` for alpha) — no extra shader. Without this the
+  HD sprite would draw normally over the EGA silhouette and the flash would
+  be lost.
+
+**Z-order caveat.** HD and EGA occupy two composited layers, not one
+interleaved stack: the entire HD layer sits over the entire upscaled-EGA
+frame. Within the HD layer, order is correct. But a *mixed* scene (e.g. an
+HD sprite that should pass behind an un-replaced EGA fore tile) can't
+interleave across the layer boundary — the HD sprite will be over the EGA
+tile. The fix is to provide HD art for the neighbouring chunks too; a
+"complete pack" has no mixed-layer seams. Documented as a pack-authoring
+contract.
+
+## 12. Summary
 
 The engine is cleanly layered enough that an HD remaster does **not** require
 touching game logic. The plan is: (1) add edge-aware shader upscaling now for an

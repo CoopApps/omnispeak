@@ -223,7 +223,7 @@ void VL_HD_BeginFrame(void)
 		backend->hd->beginFrame();
 }
 
-void VL_HD_DrawChunk(int chunk, int bufferPxX, int bufferPxY, int egaW, int egaH)
+void VL_HD_DrawChunk(int chunk, int bufferPxX, int bufferPxY, int egaW, int egaH, bool maskOnly)
 {
 	if (!vl_hd_enabled)
 		return;
@@ -232,7 +232,7 @@ void VL_HD_DrawChunk(int chunk, int bufferPxX, int bufferPxY, int egaW, int egaH
 		return;
 	VL_Backend *backend = VL_GetCurrentBackend();
 	if (backend && backend->hd && backend->hd->drawQuad)
-		backend->hd->drawQuad(img->image, bufferPxX, bufferPxY, egaW, egaH);
+		backend->hd->drawQuad(img->image, bufferPxX, bufferPxY, egaW, egaH, maskOnly);
 }
 
 void VL_HD_EndFrame(void)

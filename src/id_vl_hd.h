@@ -61,8 +61,9 @@ const VL_HDImage *VL_HD_GetImage(int chunk);
 void VL_HD_BeginFrame(void);
 // Submits an HD draw for an original chunk if a replacement exists; silently
 // does nothing otherwise (so the caller can blindly call this for every tile
-// and let the manager decide whether to draw).
-void VL_HD_DrawChunk(int chunk, int bufferPxX, int bufferPxY, int egaW, int egaH);
+// and let the manager decide whether to draw). 'maskOnly' draws a white
+// silhouette (for the EGA damage/collect flash).
+void VL_HD_DrawChunk(int chunk, int bufferPxX, int bufferPxY, int egaW, int egaH, bool maskOnly);
 void VL_HD_EndFrame(void);
 
 #endif // ID_VL_HD_H

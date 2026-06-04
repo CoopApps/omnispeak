@@ -109,8 +109,10 @@ typedef struct VL_HDBackend
 	// scrolling is applied by the backend using the scroll passed to present().
 	void (*beginFrame)(void);
 	// Draws a single HD image into an EGA-pixel rectangle of the buffer.
-	// 'image' must be a handle previously returned by loadImage.
-	void (*drawQuad)(void *image, int bufferPxX, int bufferPxY, int egaW, int egaH);
+	// 'image' must be a handle previously returned by loadImage. When
+	// 'maskOnly' is true the image is drawn as a solid-white silhouette
+	// (its alpha is kept), matching the EGA white-flash mask path.
+	void (*drawQuad)(void *image, int bufferPxX, int bufferPxY, int egaW, int egaH, bool maskOnly);
 	void (*endFrame)(void);
 } VL_HDBackend;
 

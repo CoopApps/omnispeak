@@ -1346,13 +1346,60 @@ void RF_AddSpriteDrawUsing16BitOffset(int16_t *drawEntryOffset, int unitX, int u
 	*drawEntryOffset = RF_ConvertSpriteArrayPtrTo16BitOffset(drawEntry);
 }
 
+// --- HD tile submission helpers (see id_vl_hd.c) -----------------------------
+// These mirror the EGA tile draw order so HD tiles composite with HD sprites in
+// the correct z-order: background tiles (the bg plane plus non-fore fg-plane
+// tiles) sit under sprites; fore-flagged fg-plane tiles sit over sprite layers
+// 0-2. No dirty tracking: the HD frame is rebuilt in full each refresh.
+static void RFL_SubmitHDBackgroundTiles(void)
+{
+	int scrollXtile = RF_UnitToTile(rf_scrollXUnit);
+	int scrollYtile = RF_UnitToTile(rf_scrollYUnit);
+	for (int ty = 0; ty < RF_BUFFER_HEIGHT_TILES; ++ty)
+	{
+		for (int tx = 0; tx < RF_BUFFER_WIDTH_TILES; ++tx)
+		{
+			int mapX = scrollXtile + tx, mapY = scrollYtile + ty;
+			int bgTile = CA_TileAtPos(mapX, mapY, 0);
+			int fgTile = CA_TileAtPos(mapX, mapY, 1);
+			int bufPxX = tx * 16, bufPxY = ty * 16;
+			VL_HD_DrawChunk(ca_gfxInfoE.offTiles16 + bgTile, bufPxX, bufPxY, 16, 16, false);
+			// Non-fore foreground-plane tiles render with the background.
+			if (fgTile && !(TI_ForeMisc(fgTile) & 0x80))
+				VL_HD_DrawChunk(ca_gfxInfoE.offTiles16m + fgTile, bufPxX, bufPxY, 16, 16, false);
+		}
+	}
+}
+
+static void RFL_SubmitHDForeTiles(void)
+{
+	int scrollXtile = RF_UnitToTile(rf_scrollXUnit);
+	int scrollYtile = RF_UnitToTile(rf_scrollYUnit);
+	for (int ty = 0; ty < RF_BUFFER_HEIGHT_TILES; ++ty)
+	{
+		for (int tx = 0; tx < RF_BUFFER_WIDTH_TILES; ++tx)
+		{
+			int fgTile = CA_TileAtPos(scrollXtile + tx, scrollYtile + ty, 1);
+			if (fgTile && (TI_ForeMisc(fgTile) & 0x80))
+				VL_HD_DrawChunk(ca_gfxInfoE.offTiles16m + fgTile, tx * 16, ty * 16, 16, 16, false);
+		}
+	}
+}
+
 void RFL_DrawSpriteList()
 {
+	// HD: background tiles go down first, under every sprite layer.
+	RFL_SubmitHDBackgroundTiles();
+
 	for (int zLayer = 0; zLayer < RF_NUM_SPRITE_Z_LAYERS; ++zLayer)
 	{
 		// All but the final z layer (3) are below fore-foreground tiles.
 		if (zLayer == 3)
+		{
 			RFL_RenderForeTiles();
+			// HD: fore tiles sit over sprite layers 0-2, under layer 3.
+			RFL_SubmitHDForeTiles();
+		}
 
 		for (RF_SpriteDrawEntry *sde = rf_firstSpriteTableEntry[zLayer]; sde; sde = sde->next)
 		{
@@ -1366,6 +1413,18 @@ void RFL_DrawSpriteList()
 			// Check the sprite is in-bounds.
 			if (tileX2 < tileX1 || tileY2 < tileY1)
 				continue;
+
+			// HD: submit the whole sprite frame every refresh (no dirty-block
+			// gating — the GPU redraws the lot). The native sprite occupies
+			// [pixelX + shift*2, pixelX + shift*2 + width); recovering the
+			// sub-pixel shift the EGA path bakes into the shifted bitmap places
+			// the HD art exactly where the EGA frame sits. originX/originY are
+			// already folded into sde->x/y by RF_AddSpriteDraw.
+			if (VL_HD_IsEnabled())
+			{
+				VH_SpriteTableEntry ste = VH_GetSpriteTableEntry(sde->chunk - ca_gfxInfoE.offSprites);
+				VL_HD_DrawChunk(sde->chunk, pixelX + sde->shift * 2, pixelY, ste.width, ste.height, sde->maskOnly);
+			}
 #ifdef ALWAYS_REDRAW
 			sde->updateCount = VL_GetNumBuffers();
 #endif
@@ -1437,7 +1496,12 @@ void RF_Refresh()
 	RFL_UpdateTiles();
 	RFL_ProcessSpriteErasers();
 
+	// HD compositor frame. RFL_DrawSpriteList submits HD tiles and sprites in
+	// EGA draw order (background tiles, sprites 0-2, fore tiles, sprites 3).
+	// Inert when HD is disabled; the EGA blits above/below are untouched.
+	VL_HD_BeginFrame();
 	RFL_DrawSpriteList();
+	VL_HD_EndFrame();
 
 	// No blocks should be dirty on this page after the frame has been rendered.
 	for (int y = 0; y < RF_BUFFER_HEIGHT_TILES; ++y)
@@ -1446,33 +1510,6 @@ void RF_Refresh()
 
 	if (rf_drawFunc)
 		rf_drawFunc();
-
-	// HD tile compositor. Walks every visible buffer cell and submits an HD
-	// draw for each plane that has a replacement; cells without HD assets
-	// remain whatever was blitted into rf_tileBuffer. No dirty tracking: the
-	// GPU doesn't care, and this keeps the HD path independent of every site
-	// that calls RF_RenderTile16. Manager is inert when HD is disabled.
-	VL_HD_BeginFrame();
-	{
-		int scrollXtile = RF_UnitToTile(rf_scrollXUnit);
-		int scrollYtile = RF_UnitToTile(rf_scrollYUnit);
-		for (int ty = 0; ty < RF_BUFFER_HEIGHT_TILES; ++ty)
-		{
-			for (int tx = 0; tx < RF_BUFFER_WIDTH_TILES; ++tx)
-			{
-				int mapX = scrollXtile + tx;
-				int mapY = scrollYtile + ty;
-				int bgTile = CA_TileAtPos(mapX, mapY, 0);
-				int fgTile = CA_TileAtPos(mapX, mapY, 1);
-				int bufPxX = tx * 16;
-				int bufPxY = ty * 16;
-				VL_HD_DrawChunk(ca_gfxInfoE.offTiles16 + bgTile, bufPxX, bufPxY, 16, 16);
-				if (fgTile)
-					VL_HD_DrawChunk(ca_gfxInfoE.offTiles16m + fgTile, bufPxX, bufPxY, 16, 16);
-			}
-		}
-	}
-	VL_HD_EndFrame();
 
 	// 0xef for the X-direction to match EGA keen's 2px horz scrolling.
 	VL_SetScrollCoords(RF_UnitToPixel(rf_scrollXUnit & 0xef), RF_UnitToPixel(rf_scrollYUnit & 0xff));

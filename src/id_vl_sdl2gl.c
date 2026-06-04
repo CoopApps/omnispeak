@@ -877,6 +877,7 @@ struct VL_SDL2GL_HDDraw
 	GLuint texture;
 	int bufX, bufY;	   // EGA buffer pixel coordinates (top-left).
 	int egaW, egaH;	   // Slot size in EGA buffer pixels.
+	bool maskOnly;	   // Draw as a solid-white silhouette (EGA flash).
 };
 
 static bool VL_SDL2GL_HD_HasHD(void)
@@ -950,7 +951,7 @@ static void VL_SDL2GL_HD_BeginFrame(void)
 	vl_sdl2gl_hdFrameReady = false;
 }
 
-static void VL_SDL2GL_HD_DrawQuad(void *image, int bufferPxX, int bufferPxY, int egaW, int egaH)
+static void VL_SDL2GL_HD_DrawQuad(void *image, int bufferPxX, int bufferPxY, int egaW, int egaH, bool maskOnly)
 {
 	if (!image)
 		return;
@@ -969,6 +970,7 @@ static void VL_SDL2GL_HD_DrawQuad(void *image, int bufferPxX, int bufferPxY, int
 	d->bufY = bufferPxY;
 	d->egaW = egaW;
 	d->egaH = egaH;
+	d->maskOnly = maskOnly;
 }
 
 static void VL_SDL2GL_HD_EndFrame(void)
@@ -1012,9 +1014,32 @@ static void VL_SDL2GL_HD_FlushFrame(int scrlX, int scrlY, int screenW, int scree
 	float texCoords[] = {0.0f, 0.0f, 1.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f};
 	id_glTexCoordPointer(2, GL_FLOAT, 0, texCoords);
 
+	bool combineActive = false;
 	for (int i = 0; i < vl_sdl2gl_hdNumDraws; ++i)
 	{
 		const VL_SDL2GL_HDDraw *d = &vl_sdl2gl_hdDraws[i];
+
+		// For mask (flash) draws, output solid white but keep the texture's
+		// alpha, via the fixed-function texture combiners (no extra shader):
+		//   RGB   = REPLACE(primary colour)  -> white vertex colour
+		//   ALPHA = REPLACE(texture)         -> the sprite's coverage
+		if (d->maskOnly != combineActive)
+		{
+			if (d->maskOnly)
+			{
+				glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_COMBINE);
+				glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_RGB, GL_REPLACE);
+				glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE0_RGB, GL_PRIMARY_COLOR);
+				glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_ALPHA, GL_REPLACE);
+				glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE0_ALPHA, GL_TEXTURE);
+			}
+			else
+			{
+				glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+			}
+			combineActive = d->maskOnly;
+		}
+
 		float x0 = -1.0f + (float)(d->bufX - scrlX) * invW;
 		float x1 = x0 + (float)d->egaW * invW;
 		float y0 = 1.0f - (float)(d->bufY - scrlY) * invH;	    // top
@@ -1025,6 +1050,9 @@ static void VL_SDL2GL_HD_FlushFrame(int scrlX, int scrlY, int screenW, int scree
 		id_glDrawArrays(GL_QUADS, 0, 4);
 	}
 
+	// Restore the default texture env so we don't disturb later passes.
+	if (combineActive)
+		glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
 	glDisable(GL_BLEND);
 }
 
