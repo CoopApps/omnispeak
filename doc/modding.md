@@ -123,6 +123,90 @@ Similarly, if you've added or rearranged any of the chunks, you may need to upda
 
 Omnispeak currently has no special support for uncompressed `EGAGRAPH` files, as used by some source mods. These can still be loaded by using a no-op huffman dictionary, or by modifying the Omnispeak source code.
 
+## HD Graphics Packs
+
+The SDL2+OpenGL renderer can overlay high-resolution replacement artwork on top
+of the original EGA graphics, on a per-chunk basis. This is opt-in and additive:
+any chunk without a replacement keeps rendering as upscaled EGA, so a pack can be
+as partial or as complete as you like. (See `doc/hd-remaster.md` for the
+internals.)
+
+### Enabling
+
+Run with `/HD`, or set `vl_hdAssets = 1` in the config file. HD rendering only
+works on the OpenGL backend (the default `sdl2gl` build); other backends ignore
+the setting and run pure EGA.
+
+### What a pack looks like
+
+A pack is a **manifest** plus a set of **32-bit BMP** image files, dropped *flat*
+into the Keen data directory (next to `EGAGRAPH.CKx`). Omnispeak's file lookup
+resolves single filenames, not subdirectories, so the images live alongside the
+data files rather than in a `hd/` folder.
+
+The manifest is a plain-text file named `omnispeak_hd.txt` (override with the
+`vl_hdManifest` config key). Blank lines and `#` comments are ignored; every
+other line is:
+
+```
+chunk   file                scale   [originX  originY]
+```
+
+- **chunk** — the *absolute* graphics chunk number to replace. Tiles, sprites,
+  and bitmaps all share one number space. The names and numbers come from
+  `GFXCHUNK.CKx`.
+- **file** — the BMP to load, relative to the Keen data directory.
+- **scale** — HD pixels per EGA pixel (e.g. `4` if you redraw a 16×16 tile as
+  64×64). Optional; defaults to `1`. It is informational for now — placement is
+  taken from the original chunk's size — but set it correctly for future-proofing
+  and tooling.
+- **originX / originY** — optional, sprites only; the EGA-pixel hotspot. Emitted
+  by the dumper for reference; the engine currently derives sprite placement from
+  the game, so these are informational.
+
+Example:
+
+```
+# chunk  file              scale  originX  originY
+86       bg_grass.bmp      4
+1290     keen_walk0.bmp    4      40       28
+```
+
+### Generating a starter pack
+
+Run Omnispeak with `/DUMPGFX [outputdir]` (default `hd_dump`; create the
+directory first). This decodes **every** tile, bitmap, and sprite chunk to a
+native-size 32-bit BMP and writes a ready-to-edit `omnispeak_hd.txt` listing them
+all. It runs without opening a window, so it works over SSH/headless.
+
+```
+mkdir hd_dump
+omnispeak /EPISODE EPISODE.CK4 /DUMPGFX hd_dump
+```
+
+Then: upscale or redraw the BMPs you care about (keeping transparency in the
+masked tiles/sprites), bump their `scale` column, delete the manifest lines for
+chunks you are *not* replacing, copy the kept BMPs and the manifest into the Keen
+data directory, and launch with `/HD`.
+
+### Layering caveat
+
+HD art composites as a single layer over the whole upscaled-EGA frame, so HD and
+un-replaced EGA cannot interleave in depth. In practice:
+
+- If you replace a tile's **background** but its **foreground** tile is non-empty
+  and not replaced, the HD background will cover that EGA foreground — replace
+  both.
+- An HD sprite cannot pass *behind* an un-replaced EGA foreground tile.
+
+A "complete" pack (all neighbouring chunks replaced) has no such seams; partial
+packs simply choose where the HD/EGA boundary falls.
+
+### Limitations
+
+- Fonts (`VH_DrawPropString`) are not yet HD; they render as upscaled EGA.
+- Images are 32-bit BMP today (PNG support is a possible future addition).
+
 ## Sounds and Music
 
 Similarly, Omnispeak supports the original games' `AUDIO` files, alongside their header and  Huffman dictionary.

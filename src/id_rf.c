@@ -1423,7 +1423,8 @@ void RFL_DrawSpriteList()
 			if (VL_HD_IsEnabled())
 			{
 				VH_SpriteTableEntry ste = VH_GetSpriteTableEntry(sde->chunk - ca_gfxInfoE.offSprites);
-				VL_HD_DrawChunk(sde->chunk, pixelX + sde->shift * 2, pixelY, ste.width, ste.height, sde->maskOnly);
+				// ste.width is a byte width; the pixel width is *8.
+				VL_HD_DrawChunk(sde->chunk, pixelX + sde->shift * 2, pixelY, ste.width * 8, ste.height, sde->maskOnly);
 			}
 #ifdef ALWAYS_REDRAW
 			sde->updateCount = VL_GetNumBuffers();

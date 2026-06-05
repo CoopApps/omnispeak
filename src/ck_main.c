@@ -733,6 +733,20 @@ int main(int argc, char *argv[])
 	}
 #endif
 
+	// HD asset-pack dumper: decode every graphics chunk to BMP + a starter
+	// manifest, then exit. Runs before the video backend starts, so it works
+	// headless. Output dir defaults to "hd_dump" (create it first).
+	for (int i = 1; i < argc; ++i)
+	{
+		if (!CK_Cross_strcasecmp(argv[i], "/DUMPGFX"))
+		{
+			CA_Startup();
+			const char *outDir = (i + 1 < argc && argv[i + 1][0] != '/') ? argv[i + 1] : NULL;
+			CK_DumpGfx(outDir);
+			return 0;
+		}
+	}
+
 	vl_swapInterval = swapInterval;
 	VL_SetParams(isFullScreen, isAspectCorrected, hasBorder, isIntegerScaled);
 

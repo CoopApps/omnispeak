@@ -151,6 +151,10 @@ typedef struct VL_Backend
 	struct VL_HDBackend *hd;
 } VL_Backend;
 
+// The fixed 16-colour EGA RGB palette ([index][0..2] = R, G, B). Useful for
+// tools that decode EGA chunks without a running backend (see ck_dumpgfx.c).
+extern const uint8_t VL_EGARGBColorTable[16][3];
+
 void VL_InitScreen(void);
 void VL_Startup();
 void VL_Shutdown();

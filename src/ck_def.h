@@ -482,6 +482,9 @@ extern bool ck_storeDemo;
 void CK_MeasureMultiline(const char *str, uint16_t *w, uint16_t *h);
 void CK_ShutdownID();
 
+/* ck_dumpgfx.c */
+void CK_DumpGfx(const char *outDir);
+
 /* ck_map.c */
 extern chunk_id_t ck_mapKeenBaseFrame[];
 

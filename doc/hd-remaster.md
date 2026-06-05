@@ -448,7 +448,37 @@ either a glyph-atlas HD font texture or per-codepoint manifest entries;
 the existing output filters (Phase 0) already upscale EGA fonts
 acceptably. Deferred to a future phase with the right tooling.
 
-## 13. Summary
+## 13. Phase 5: shipped — tooling & docs
+
+A pack is now authorable without hand-tooling.
+
+- **`/DUMPGFX [outdir]` exporter.** `src/ck_dumpgfx.c` decodes every tile
+  (16×16 bg + fg), bitmap, masked bitmap, and sprite chunk straight from the
+  planar EGA data (via `VL_EGARGBColorTable`) and writes each as a native-size
+  32-bit BMP, plus a ready-to-edit `omnispeak_hd.txt` manifest listing them
+  all with correct absolute chunk numbers (and sprite origins). It runs
+  **before** the video backend starts (`ck_main.c` handles the switch right
+  after the episode is resolved, then exits), so it works headless.
+- **Backend-free & alpha-correct.** The dumper writes a `BITMAPV4HEADER`
+  32-bit BGRA BMP by hand (`SDL_SaveBMP` drops alpha), with masked
+  tiles/sprites carrying transparency from the EGA mask plane (set mask bit =
+  transparent, matching `VL_MaskedBlitToPAL8`). A round-trip test confirmed the
+  output reloads through the Phase 1 `SDL_LoadBMP` path with alpha intact.
+- **Validation.** Loading a pack with `/HD` already reports per-entry problems:
+  each unreadable image, decode failure, or missing manifest logs a warning and
+  is skipped, and a final "Loaded N HD asset(s)" line confirms the count — so
+  enabling the pack doubles as the manifest check.
+- **Docs.** `doc/modding.md` gains an "HD Graphics Packs" section covering
+  enabling, the manifest format, the `/DUMPGFX` workflow, the layering caveat,
+  and current limitations.
+
+**Fixed in passing:** the sprite-table `width` field is a *byte* width; the
+Phase 3/4 sprite draws were missing the `*8` and would have rendered HD sprites
+at one-eighth width. Corrected in `id_rf.c` and `id_vh.c`.
+
+**Deferred (not blocking a pack):** PNG input (BMP only today) and HD fonts.
+
+## 14. Summary
 
 The engine is cleanly layered enough that an HD remaster does **not** require
 touching game logic. The plan is: (1) add edge-aware shader upscaling now for an

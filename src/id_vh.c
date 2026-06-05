@@ -169,8 +169,8 @@ void VH_DrawSprite(int x, int y, int chunk)
 
 	VL_MaskedBlitToScreen(data, x & ~7, y, width, spr.height);
 	// HD: place at the native (sub-pixel-recovered) origin and native size,
-	// matching the EGA bitmap's bounding box.
-	VL_HD_DrawChunk(chunk, x, y, spr.width, spr.height, false);
+	// matching the EGA bitmap's bounding box. spr.width is a byte width (*8).
+	VL_HD_DrawChunk(chunk, x, y, spr.width * 8, spr.height, false);
 }
 
 void VH_DrawSpriteMask(int x, int y, int chunk, int colour)
@@ -190,8 +190,9 @@ void VH_DrawSpriteMask(int x, int y, int chunk, int colour)
 	VL_1bppInvBlitToScreen(data, x & ~7, y, width, spr.height, colour);
 	// HD: silhouette only (the colour argument is folded down to white; vanilla
 	// callers use white nearly exclusively, and the alternative is colour-keyed
-	// state we don't want to thread through the backend yet).
-	VL_HD_DrawChunk(chunk, x, y, spr.width, spr.height, true);
+	// state we don't want to thread through the backend yet). spr.width is a
+	// byte width (*8).
+	VL_HD_DrawChunk(chunk, x, y, spr.width * 8, spr.height, true);
 }
 
 void VH_DrawShiftedSprite(int x, int y, int chunk, int shift)
