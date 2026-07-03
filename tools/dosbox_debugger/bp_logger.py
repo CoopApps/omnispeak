@@ -3,8 +3,13 @@
 DOSBox-X Breakpoint Register Logger
 ====================================
 Waits for a breakpoint to fire in the DOSBox-X Debugger window,
-captures all register values, presses F5 to continue, and repeats.
+captures all register values, sends a key to continue, and repeats.
 Results are saved to an Excel spreadsheet.
+
+Keys:
+    F5  — Run (continue until next breakpoint)
+    F10 — Step Over (execute one instruction, don't enter calls)
+    F11 — Step Into (execute one instruction, enter calls)
 
 Requirements:
     pip install pillow pytesseract openpyxl pandas
@@ -12,7 +17,9 @@ Requirements:
 
 Usage:
     python3 bp_logger.py --output registers.xlsx --hits 100
-    python3 bp_logger.py --output registers.xlsx --hits 100 --delay 0.3
+    python3 bp_logger.py --output registers.xlsx --hits 100 --key F10
+    python3 bp_logger.py --output registers.xlsx --hits 100 --key F11
+    python3 bp_logger.py --output registers.xlsx --hits 100 --key F5 --delay 0.5
 """
 
 import argparse
@@ -181,16 +188,22 @@ def is_at_breakpoint(win_id, prev_eip):
     return stopped, img, row, text
 
 
-def press_f5(win_id):
-    """Send F5 to the debugger window (Run / Continue)."""
-    subprocess.run(["xdotool", "key", "--window", win_id, "F5"])
+KEY_DESCRIPTIONS = {
+    "F5":  "Run (continue to next breakpoint)",
+    "F10": "Step Over (one instruction, skip calls)",
+    "F11": "Step Into (one instruction, enter calls)",
+}
+
+def press_key(win_id, key):
+    """Send a key to the debugger window."""
+    subprocess.run(["xdotool", "key", "--window", win_id, key])
 
 
 def save_excel(rows, output_path):
     """Write collected rows to Excel."""
     df = pd.DataFrame(rows)
     cols = (
-        ["Hit", "Timestamp", "EIP"]
+        ["Hit", "Timestamp", "Key", "EIP"]
         + REGISTERS_32[:-1]  # EIP already first; skip duplicate
         + REGISTERS_16
         + [f"F_{f}" for f in FLAGS]
@@ -223,8 +236,11 @@ def main():
                         help="Output Excel file (default: bp_registers.xlsx)")
     parser.add_argument("--hits", type=int, default=100,
                         help="Number of breakpoint hits to capture (default: 100)")
+    parser.add_argument("--key", choices=["F5", "F10", "F11"], default="F5",
+                        help="Key to press after each capture: F5=Run, F10=Step Over, F11=Step Into (default: F5)")
     parser.add_argument("--delay", type=float, default=0.4,
-                        help="Seconds to wait after F5 before checking for BP (default: 0.4)")
+                        help="Seconds to wait after keypress before capturing (default: 0.4; "
+                             "use higher values with F5 if the BP takes time to fire)")
     parser.add_argument("--screenshots", action="store_true",
                         help="Save a PNG screenshot for each hit alongside the Excel file")
     args = parser.parse_args()
@@ -235,8 +251,13 @@ def main():
     print(f"Looking for '{WINDOW_TITLE}' window...")
     win_id = find_window()
     print(f"Found window ID: {win_id}")
-    print(f"Will capture {args.hits} breakpoint hits → {output_path}")
-    print("Make sure your breakpoint is already set in DOSBox-X.")
+    key_desc = KEY_DESCRIPTIONS.get(args.key, args.key)
+    print(f"Key: {args.key} — {key_desc}")
+    print(f"Will capture {args.hits} hits → {output_path}")
+    if args.key == "F5":
+        print("Make sure your breakpoint is already set in DOSBox-X.")
+    else:
+        print(f"Will step {args.hits} instructions using {args.key}.")
     print("Press Ctrl+C at any time to stop and save what's been collected.\n")
 
     rows = []
@@ -250,6 +271,7 @@ def main():
     data_view = parse_data_view(ocr(crop_data_section(img)))
     row["Hit"] = 0
     row["Timestamp"] = time.strftime("%H:%M:%S")
+    row["Key"] = args.key
     row["Instruction"] = current_instr
     row["Code_Listing"] = code_listing
     row["Data_View"] = data_view
@@ -266,8 +288,8 @@ def main():
 
     try:
         for hit in range(1, args.hits + 1):
-            # Press F5 to continue execution
-            press_f5(win_id)
+            # Send the configured key to continue/step
+            press_key(win_id, args.key)
             time.sleep(args.delay)
 
             # Poll until EIP changes (breakpoint fired again) or timeout
@@ -292,6 +314,7 @@ def main():
             data_view = parse_data_view(ocr(crop_data_section(captured_img)))
             row["Hit"] = hit
             row["Timestamp"] = time.strftime("%H:%M:%S")
+            row["Key"] = args.key
             row["Instruction"] = current_instr
             row["Code_Listing"] = code_listing
             row["Data_View"] = data_view
