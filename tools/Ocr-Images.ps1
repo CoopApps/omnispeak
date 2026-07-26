@@ -34,47 +34,96 @@ function Await($WinRtTask, [type]$ResultType) {
 }
 
 # Windows OCR returns lines in raw top-to-bottom raster order, which
-# interleaves left/right columns on multi-column pages (e.g. magazines,
-# newspapers). This reconstructs proper reading order: detect a 2-column
-# split from each line's horizontal position, then emit the left column
-# top-to-bottom followed by the right column top-to-bottom. Falls back to
-# simple top-to-bottom order when no clear column split is found.
-function Get-ReadingOrderText($OcrResult, [double]$ImageWidth) {
+# interleaves columns on multi-column pages (magazines, newspapers) -
+# and worse, these photos are of open two-page spreads, so a photo can
+# contain 2, 3, 4+ real text columns (each page's own columns, side by
+# side). Rather than assume a fixed column count, this finds vertical
+# "gutters" - strips of the content area that no word ever overlaps,
+# anywhere in the image - and treats each one as a column boundary.
+# A table's internal cell gaps don't qualify: they're only empty over
+# the table's own row range, not the whole page height, so some other
+# line's text elsewhere in that X range keeps the strip "occupied".
+function Get-ReadingOrderText($OcrResult) {
+    $WordRects = @()
     $LineInfos = @()
     foreach ($Line in $OcrResult.Lines) {
         if ($Line.Words.Count -eq 0) { continue }
         $MinX = ($Line.Words | ForEach-Object { $_.BoundingRect.X } | Measure-Object -Minimum).Minimum
+        $MaxX = ($Line.Words | ForEach-Object { $_.BoundingRect.X + $_.BoundingRect.Width } | Measure-Object -Maximum).Maximum
         $MinY = ($Line.Words | ForEach-Object { $_.BoundingRect.Y } | Measure-Object -Minimum).Minimum
-        $LineInfos += [PSCustomObject]@{ Text = $Line.Text; X = $MinX; Y = $MinY }
+        $LineInfos += [PSCustomObject]@{ Text = $Line.Text; MinX = $MinX; MaxX = $MaxX; Y = $MinY }
+        foreach ($Word in $Line.Words) {
+            $WordRects += [PSCustomObject]@{ X1 = $Word.BoundingRect.X; X2 = $Word.BoundingRect.X + $Word.BoundingRect.Width }
+        }
     }
 
-    if ($LineInfos.Count -lt 6) {
+    if ($LineInfos.Count -lt 4 -or $WordRects.Count -eq 0) {
         return ($LineInfos | Sort-Object Y | ForEach-Object { $_.Text }) -join "`n"
     }
 
-    # Simple 1D k-means (k=2) on each line's left-edge X to find a column split.
-    $Xs = @($LineInfos.X)
-    $C1 = ($Xs | Measure-Object -Minimum).Minimum
-    $C2 = ($Xs | Measure-Object -Maximum).Maximum
-    for ($iter = 0; $iter -lt 10; $iter++) {
-        $Group1 = @($Xs | Where-Object { [Math]::Abs($_ - $C1) -le [Math]::Abs($_ - $C2) })
-        $Group2 = @($Xs | Where-Object { [Math]::Abs($_ - $C1) -gt [Math]::Abs($_ - $C2) })
-        if ($Group1.Count -gt 0) { $C1 = ($Group1 | Measure-Object -Average).Average }
-        if ($Group2.Count -gt 0) { $C2 = ($Group2 | Measure-Object -Average).Average }
+    $ContentMinX = ($WordRects.X1 | Measure-Object -Minimum).Minimum
+    $ContentMaxX = ($WordRects.X2 | Measure-Object -Maximum).Maximum
+    $ContentWidth = $ContentMaxX - $ContentMinX
+
+    if ($ContentWidth -le 0) {
+        return ($LineInfos | Sort-Object Y | ForEach-Object { $_.Text }) -join "`n"
     }
 
-    $ColumnGap = [Math]::Abs($C2 - $C1)
-    $MinGroupSize = 3
+    $NumBins = 150
+    $BinWidth = $ContentWidth / $NumBins
+    $Occupied = New-Object bool[] $NumBins
 
-    if ($ColumnGap -gt ($ImageWidth * 0.15) -and $Group1.Count -ge $MinGroupSize -and $Group2.Count -ge $MinGroupSize) {
-        $Threshold = ($C1 + $C2) / 2
-        $LeftCol = @($LineInfos | Where-Object { $_.X -lt $Threshold } | Sort-Object Y)
-        $RightCol = @($LineInfos | Where-Object { $_.X -ge $Threshold } | Sort-Object Y)
-        $Ordered = @($LeftCol) + @($RightCol)
-        return ($Ordered | ForEach-Object { $_.Text }) -join "`n"
+    foreach ($W in $WordRects) {
+        $StartBin = [Math]::Max(0, [int][Math]::Floor(($W.X1 - $ContentMinX) / $BinWidth))
+        $EndBin = [Math]::Min($NumBins - 1, [int][Math]::Ceiling(($W.X2 - $ContentMinX) / $BinWidth) - 1)
+        for ($b = $StartBin; $b -le $EndBin; $b++) {
+            $Occupied[$b] = $true
+        }
     }
 
-    return ($LineInfos | Sort-Object Y | ForEach-Object { $_.Text }) -join "`n"
+    # A gutter must be a run of never-occupied bins at least ~1% of the content width wide.
+    $MinGutterBins = [Math]::Max(2, [int][Math]::Ceiling($NumBins * 0.01))
+    $Boundaries = @()
+    $RunStart = -1
+    for ($b = 0; $b -lt $NumBins; $b++) {
+        if (-not $Occupied[$b]) {
+            if ($RunStart -eq -1) { $RunStart = $b }
+        }
+        elseif ($RunStart -ne -1) {
+            $RunLength = $b - $RunStart
+            if ($RunLength -ge $MinGutterBins) {
+                $MidBin = $RunStart + ($RunLength / 2.0)
+                $Boundaries += $ContentMinX + ($MidBin * $BinWidth)
+            }
+            $RunStart = -1
+        }
+    }
+
+    if ($Boundaries.Count -eq 0) {
+        return ($LineInfos | Sort-Object Y | ForEach-Object { $_.Text }) -join "`n"
+    }
+
+    $Boundaries = @($Boundaries | Sort-Object)
+    $Bands = New-Object System.Collections.Generic.List[object]
+    for ($i = 0; $i -le $Boundaries.Count; $i++) {
+        $Bands.Add((New-Object System.Collections.Generic.List[object]))
+    }
+
+    foreach ($L in $LineInfos) {
+        $Center = ($L.MinX + $L.MaxX) / 2.0
+        $BandIndex = 0
+        for ($i = 0; $i -lt $Boundaries.Count; $i++) {
+            if ($Center -ge $Boundaries[$i]) { $BandIndex = $i + 1 }
+        }
+        $Bands[$BandIndex].Add($L)
+    }
+
+    $OrderedText = @()
+    foreach ($Band in $Bands) {
+        foreach ($L in ($Band | Sort-Object Y)) { $OrderedText += $L.Text }
+    }
+
+    return ($OrderedText -join "`n")
 }
 
 [Windows.Storage.StorageFile, Windows.Storage, ContentType = WindowsRuntime] | Out-Null
@@ -131,7 +180,7 @@ foreach ($Img in $Images) {
         }
 
         $OcrResult = Await ($OcrEngine.RecognizeAsync($Bitmap)) ([Windows.Media.Ocr.OcrResult])
-        $OrderedText = Get-ReadingOrderText $OcrResult $Bitmap.PixelWidth
+        $OrderedText = Get-ReadingOrderText $OcrResult
 
         $TextOutPath = Join-Path $Img.DirectoryName ($Img.BaseName + ".txt")
         [System.IO.File]::WriteAllText($TextOutPath, $OrderedText)
